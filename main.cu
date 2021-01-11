@@ -109,13 +109,13 @@ void kMeansCPU(int *points, int size) {
         iters++;
     }
 #if PRINT
-    std::cout <<"POINT-TO-CENTROID:"<< std::endl;
+    std::cout << "POINT-TO-CENTROID:" << std::endl;
     for (int i = 0; i < size / DIM; i++) {
         std::cout << pointToCentroid[i] << ",";
     }
     std::cout << std::endl;
 
-    std::cout <<"CENTROIDS:"<< std::endl;
+    std::cout << "CENTROIDS:" << std::endl;
     for (int i = 0; i < CENTROID_COUNT * DIM; i++) {
         std::cout << centroids[i] << ",";
     }
@@ -203,7 +203,7 @@ __global__ void newCentroids(const int *points, const int *p2c, float *centroids
 
 void kMeansCUDA(int *points) {
     dim3 block(32, 4);
-    dim3 grid(block.x * block.y, (int)ceil((float) POINTS_COUNT / (float)(block.x * block.y)));
+    dim3 grid(block.x * block.y, (int) ceil((float) POINTS_COUNT / (float) (block.x * block.y)));
 
     float *dists;
     float *centroids;
@@ -239,7 +239,7 @@ void kMeansCUDA(int *points) {
     }
     std::cout << std::endl;
 
-    std::cout <<"CENTROIDS:"<< std::endl;
+    std::cout << "CENTROIDS:" << std::endl;
     for (int i = 0; i < CENTROID_COUNT * DIM; i++) {
         std::cout << centroids[i] << ",";
     }
@@ -296,7 +296,8 @@ __global__ void distances_calculation(const int *points, int *p2c, const float *
 }
 
 
-
+// new centroids are calculated based on reductions O(log n) rather than O(n)
+//https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf
 __global__ void move_centroids(const int *points, const int *p2c, float *centroids, int *counters) {
     const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= POINTS_COUNT) { return; }
@@ -377,7 +378,7 @@ void optimalKMeansCUDA(int *points) {
     }
     std::cout << std::endl;
 
-    std::cout <<"CENTROIDS:"<< std::endl;
+    std::cout << "CENTROIDS:" << std::endl;
     for (int i = 0; i < CENTROID_COUNT * DIM; i++) {
         std::cout << centroids[i] << ",";
     }
