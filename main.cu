@@ -284,7 +284,7 @@ __device__ float distance_squared(const int *points, const float *centroid) {
 
 __global__ void distances_calculation(const int *points, int *d_clust_assn, const float *d_centroids) {
     //get idx for this datapoint
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
 
     //bounds check
     if (idx >= POINTS_COUNT) return;
@@ -294,14 +294,14 @@ __global__ void distances_calculation(const int *points, int *d_clust_assn, cons
     int closest_centroid = 0;
 
     int point[DIM] = {};
-    for(int cDim = 0; cDim < DIM; cDim++){
-        point[cDim] = points[idx*DIM + cDim];
+    for (int cDim = 0; cDim < DIM; cDim++) {
+        point[cDim] = points[idx * DIM + cDim];
     }
 
     for (int c = 0; c < CENTROID_COUNT; ++c) {
         float centroid[DIM] = {};
-        for(int cDim = 0; cDim < DIM; cDim++){
-            centroid[cDim] = d_centroids[c*DIM + cDim];
+        for (int cDim = 0; cDim < DIM; cDim++) {
+            centroid[cDim] = d_centroids[c * DIM + cDim];
         }
 
         float dist = distance_squared(point, centroid);
@@ -318,7 +318,8 @@ __global__ void distances_calculation(const int *points, int *d_clust_assn, cons
 
 #define TPB 32
 
-__global__ void move_centroids(const int *d_datapoints, const int *d_clust_assn, float *d_centroids, int *d_clust_sizes) {
+__global__ void
+move_centroids(const int *d_datapoints, const int *d_clust_assn, float *d_centroids, int *d_clust_sizes) {
     //get idx of thread at grid level
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -329,8 +330,10 @@ __global__ void move_centroids(const int *d_datapoints, const int *d_clust_assn,
     const int s_idx = threadIdx.x;
 
     //put the datapoints and corresponding cluster assignments in shared memory so that they can be summed by thread 0 later
-    __shared__ float s_datapoints[TPB];
-    s_datapoints[s_idx] = d_datapoints[idx];
+    __shared__ int s_datapoints[TPB * DIM];
+    for (int cDim = 0; cDim < DIM; cDim++) {
+        s_datapoints[s_idx * DIM + cDim] = d_datapoints[idx * DIM + cDim];
+    }
 
     __shared__ int s_clust_assn[TPB];
     s_clust_assn[s_idx] = d_clust_assn[idx];
@@ -339,18 +342,22 @@ __global__ void move_centroids(const int *d_datapoints, const int *d_clust_assn,
 
     //it is the thread with idx 0 (in each block) that sums up all the values within the shared array for the block it is in
     if (s_idx == 0) {
-        float b_clust_datapoint_sums[CENTROID_COUNT] = {0};
+        float b_clust_datapoint_sums[CENTROID_COUNT * DIM] = {0};
         int b_clust_sizes[CENTROID_COUNT] = {0};
 
         for (int j = 0; j < blockDim.x; ++j) {
             int clust_id = s_clust_assn[j];
-            b_clust_datapoint_sums[clust_id] += s_datapoints[j];
+            for (int cDim = 0; cDim < DIM; cDim++) {
+                b_clust_datapoint_sums[clust_id * DIM + cDim] += (float) s_datapoints[j * DIM + cDim];
+            }
             b_clust_sizes[clust_id] += 1;
         }
 
         //Now we add the sums to the global centroids and add the counts to the global counts.
         for (int z = 0; z < CENTROID_COUNT; ++z) {
-            atomicAdd(&d_centroids[z], b_clust_datapoint_sums[z]);
+            for (int cDim = 0; cDim < DIM; cDim++) {
+                atomicAdd(&d_centroids[z * DIM + cDim], b_clust_datapoint_sums[z * DIM + cDim]);
+            }
             atomicAdd(&d_clust_sizes[z], b_clust_sizes[z]);
         }
     }
@@ -359,7 +366,10 @@ __global__ void move_centroids(const int *d_datapoints, const int *d_clust_assn,
 
     //currently centroids are just sums, so divide by size to get actual centroids
     if (idx < CENTROID_COUNT) {
-        d_centroids[idx] = d_centroids[idx] / d_clust_sizes[idx];
+        for (int cDim = 0; cDim < DIM; cDim++) {
+            d_centroids[idx * DIM + cDim] = d_centroids[idx * DIM + cDim] / (float) d_clust_sizes[idx];
+
+        }
     }
 }
 
@@ -428,7 +438,7 @@ int main() {
 
     printf("----CUDA NOT OPTIMAL SOLUTION----\n");
     clock_gettime(CLOCK_MONOTONIC, &start);
-    kMeansCUDA(points);
+    //   kMeansCUDA(points);
     clock_gettime(CLOCK_MONOTONIC, &end);
     print_timediff("CUDA time ", start, end);
 
