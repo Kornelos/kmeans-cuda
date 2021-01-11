@@ -3,14 +3,15 @@
 #include <cmath>
 #include <random>
 
-#define DIM 1
-#define CENTROID_COUNT 2
-#define POINTS_COUNT 8
-#define POINTS_RANGE 50
-#define ITERS 18
-#define NORMAL_DIST true
+#define TPB 32 // tuning this parameter can improve CUDA perf
 
-#define DEBUG false
+//control params
+#define DIM 3
+#define CENTROID_COUNT 8
+#define POINTS_COUNT TPB * 40
+#define POINTS_RANGE 256
+#define ITERS 3
+#define NORMAL_DIST false
 #define PRINT true
 
 ///// UTILS
@@ -34,16 +35,10 @@ struct timespec &end) {
 
 float distanceBetweenTwoPoints(int *points, float *centroids, int point, int centroid) {
 
-    //printf("Distance between [%d %d %d] and [%d %d %d] ",
-    // points[point * DIM ],points[point * DIM +1 ],points[point * DIM +2 ],
-    // centroids[centroid * DIM ],centroids[centroid * DIM +1 ],centroids[centroid * DIM +2 ]
-    // );
-
     int sum = 0;
     for (int i = 0; i < DIM; i++) {
         sum += std::pow((float) points[point * DIM + i] - centroids[centroid * DIM + i], 2);
     }
-    //printf(" = %f\n", sqrt(sum));
     return std::sqrt(sum);
 }
 
@@ -114,8 +109,15 @@ void kMeansCPU(int *points, int size) {
         iters++;
     }
 #if PRINT
+    std::cout <<"POINT-TO-CENTROID:"<< std::endl;
     for (int i = 0; i < size / DIM; i++) {
         std::cout << pointToCentroid[i] << ",";
+    }
+    std::cout << std::endl;
+
+    std::cout <<"CENTROIDS:"<< std::endl;
+    for (int i = 0; i < CENTROID_COUNT * DIM; i++) {
+        std::cout << centroids[i] << ",";
     }
     std::cout << std::endl;
 #endif
@@ -201,7 +203,7 @@ __global__ void newCentroids(const int *points, const int *p2c, float *centroids
 
 void kMeansCUDA(int *points) {
     dim3 block(32, 4);
-    dim3 grid(block.x * block.y, ceil((float) POINTS_COUNT / (block.x * block.y)));
+    dim3 grid(block.x * block.y, (int)ceil((float) POINTS_COUNT / (float)(block.x * block.y)));
 
     float *dists;
     float *centroids;
@@ -215,46 +217,18 @@ void kMeansCUDA(int *points) {
     randomCentroids(points, centroids, POINTS_COUNT * DIM);
     int iter = 0;
     while (iter < ITERS) {
-#if DEBUG
-        std::cout <<"CENTROIDS:"<< std::endl;
-        for (int i = 0; i < CENTROID_COUNT * DIM; i++) {
-            std::cout << centroids[i] << ",";
-        }
-        std::cout << std::endl;
-#endif
         //for each point calculate distance
         cudaMemset(dists, 0.0, CENTROID_COUNT * POINTS_COUNT * sizeof(float));
         distance<<<grid, block>>>(points, dists, centroids);
-#if DEBUG
         checkCuda(cudaDeviceSynchronize());
-        std::cout <<"DISTS:"<< std::endl;
-        for (int i = 0; i < CENTROID_COUNT * POINTS_COUNT; i++) {
-            std::cout << dists[i] << ",";
-        }
-        std::cout << std::endl;
-#endif
         //assign centroid to each point
         cudaMemset(dists, 0, POINTS_COUNT * sizeof(int));
         assign<<<grid, block>>>(dists, pointToCentroid);
-#if DEBUG
         checkCuda(cudaDeviceSynchronize());
-        std::cout <<"POINT-TO-CENTROID:"<< std::endl;
-        for (int i = 0; i < POINTS_COUNT; i++) {
-            std::cout << pointToCentroid[i] << ",";
-        }
-        std::cout << std::endl;
-#endif
         //recalculate each centroid
         cudaMemset(centroids, 0.0, CENTROID_COUNT * DIM * sizeof(float));
         newCentroids<<<1, CENTROID_COUNT>>>(points, pointToCentroid, centroids);
-#if DEBUG
         checkCuda(cudaDeviceSynchronize());
-        std::cout <<"NEW CENTROIDS:"<< std::endl;
-        for (int i = 0; i < CENTROID_COUNT * DIM; i++) {
-            std::cout << centroids[i] << ",";
-        }
-        std::cout << std::endl;
-#endif
         iter++;
     }
 #if PRINT
@@ -264,6 +238,12 @@ void kMeansCUDA(int *points) {
         std::cout << pointToCentroid[i] << ",";
     }
     std::cout << std::endl;
+
+    std::cout <<"CENTROIDS:"<< std::endl;
+    for (int i = 0; i < CENTROID_COUNT * DIM; i++) {
+        std::cout << centroids[i] << ",";
+    }
+    std::cout << std::endl;
 #endif
 
     // cleanup
@@ -271,6 +251,8 @@ void kMeansCUDA(int *points) {
     checkCuda(cudaDeviceSynchronize());
     checkCuda(cudaFree(centroids));
     checkCuda(cudaFree(dists));
+    checkCuda(cudaFree(pointToCentroid));
+    checkCuda(cudaFree(clusterSizes));
 }
 //////////////////////////////////////// CUDA sol 2 ////////////////////////////////////////
 
@@ -282,12 +264,9 @@ __device__ float distance_squared(const int *points, const float *centroid) {
     return sum;
 }
 
-__global__ void distances_calculation(const int *points, int *d_clust_assn, const float *d_centroids) {
-    //get idx for this datapoint
+__global__ void distances_calculation(const int *points, int *p2c, const float *centroids) {
     const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-    //bounds check
-    if (idx >= POINTS_COUNT) return;
+    if (idx >= POINTS_COUNT) { return; }
 
     //find the closest centroid to this datapoint
     float min_dist = INFINITY;
@@ -301,7 +280,7 @@ __global__ void distances_calculation(const int *points, int *d_clust_assn, cons
     for (int c = 0; c < CENTROID_COUNT; ++c) {
         float centroid[DIM] = {};
         for (int cDim = 0; cDim < DIM; cDim++) {
-            centroid[cDim] = d_centroids[c * DIM + cDim];
+            centroid[cDim] = centroids[c * DIM + cDim];
         }
 
         float dist = distance_squared(point, centroid);
@@ -313,61 +292,57 @@ __global__ void distances_calculation(const int *points, int *d_clust_assn, cons
     }
 
     //assign closest cluster id for this datapoint/thread
-    d_clust_assn[idx] = closest_centroid;
+    p2c[idx] = closest_centroid;
 }
 
-#define TPB 32
 
-__global__ void
-move_centroids(const int *d_datapoints, const int *d_clust_assn, float *d_centroids, int *d_clust_sizes) {
-    //get idx of thread at grid level
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    //bounds check
-    if (idx >= POINTS_COUNT) return;
+__global__ void move_centroids(const int *points, const int *p2c, float *centroids, int *counters) {
+    const uint idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= POINTS_COUNT) { return; }
 
     //get idx of thread at the block level
-    const int s_idx = threadIdx.x;
+    const uint s_idx = threadIdx.x;
 
-    //put the datapoints and corresponding cluster assignments in shared memory so that they can be summed by thread 0 later
-    __shared__ int s_datapoints[TPB * DIM];
+    //put the points and corresponding cluster assignments in shared memory so that they can be summed by thread 0 later
+    __shared__ int sPoints[TPB * DIM];
     for (int cDim = 0; cDim < DIM; cDim++) {
-        s_datapoints[s_idx * DIM + cDim] = d_datapoints[idx * DIM + cDim];
+        sPoints[s_idx * DIM + cDim] = points[idx * DIM + cDim];
     }
 
-    __shared__ int s_clust_assn[TPB];
-    s_clust_assn[s_idx] = d_clust_assn[idx];
+    __shared__ int sp2c[TPB];
+    sp2c[s_idx] = p2c[idx];
 
     __syncthreads();
 
     //it is the thread with idx 0 (in each block) that sums up all the values within the shared array for the block it is in
     if (s_idx == 0) {
-        float b_clust_datapoint_sums[CENTROID_COUNT * DIM] = {0};
-        int b_clust_sizes[CENTROID_COUNT] = {0};
+        float blockSums[CENTROID_COUNT * DIM] = {0};
+        int blockCounts[CENTROID_COUNT] = {0};
 
         for (int j = 0; j < blockDim.x; ++j) {
-            int clust_id = s_clust_assn[j];
+            int cid = sp2c[j];
             for (int cDim = 0; cDim < DIM; cDim++) {
-                b_clust_datapoint_sums[clust_id * DIM + cDim] += (float) s_datapoints[j * DIM + cDim];
+                blockSums[cid * DIM + cDim] += (float) sPoints[j * DIM + cDim];
             }
-            b_clust_sizes[clust_id] += 1;
+            blockCounts[cid] += 1;
         }
 
         //Now we add the sums to the global centroids and add the counts to the global counts.
         for (int z = 0; z < CENTROID_COUNT; ++z) {
             for (int cDim = 0; cDim < DIM; cDim++) {
-                atomicAdd(&d_centroids[z * DIM + cDim], b_clust_datapoint_sums[z * DIM + cDim]);
+                atomicAdd(&centroids[z * DIM + cDim], blockSums[z * DIM + cDim]);
             }
-            atomicAdd(&d_clust_sizes[z], b_clust_sizes[z]);
+            atomicAdd(&counters[z], blockCounts[z]);
         }
     }
 
     __syncthreads();
 
-    //currently centroids are just sums, so divide by size to get actual centroids
+    //get centroids
     if (idx < CENTROID_COUNT) {
         for (int cDim = 0; cDim < DIM; cDim++) {
-            d_centroids[idx * DIM + cDim] = d_centroids[idx * DIM + cDim] / (float) d_clust_sizes[idx];
+            centroids[idx * DIM + cDim] = centroids[idx * DIM + cDim] / (float) counters[idx];
 
         }
     }
@@ -385,22 +360,12 @@ void optimalKMeansCUDA(int *points) {
 
     randomCentroids(points, centroids, POINTS_COUNT * DIM);
 
-    int num_threads = 1024;
-    int num_blocks = (POINTS_COUNT + num_threads - 1) / num_threads;
-    //we will be accessing memory structures concurrently -> AoS makes more sense than SoA
-
-    int mem = DIM * CENTROID_COUNT * sizeof(float) + (DIM + 1) * num_threads * sizeof(float);
-    int mem2 = (DIM + 1) * num_blocks * sizeof(float);
     for (int i = 0; i < ITERS; ++i) {
-        //__global__ void distances_calculation(const int *d_datapoints, int *d_clust_assn, const float *d_centroids) {
         distances_calculation<<<(POINTS_COUNT + TPB - 1) / TPB, TPB>>>(points, pointToCentroid, centroids);
-        checkCuda(cudaPeekAtLastError());
         checkCuda(cudaDeviceSynchronize());
-        //__global__ void move_centroids(int *d_datapoints, int *d_clust_assn, float *d_centroids, int *d_clust_sizes) {
         cudaMemset(centroids, 0.0, CENTROID_COUNT * sizeof(float));
         cudaMemset(counters, 0, CENTROID_COUNT * sizeof(int));
         move_centroids<<<(POINTS_COUNT + TPB - 1) / TPB, TPB>>>(points, pointToCentroid, centroids, counters);
-        checkCuda(cudaPeekAtLastError());
         checkCuda(cudaDeviceSynchronize());
     }
 
@@ -411,8 +376,14 @@ void optimalKMeansCUDA(int *points) {
         std::cout << pointToCentroid[i] << ",";
     }
     std::cout << std::endl;
-#endif
 
+    std::cout <<"CENTROIDS:"<< std::endl;
+    for (int i = 0; i < CENTROID_COUNT * DIM; i++) {
+        std::cout << centroids[i] << ",";
+    }
+    std::cout << std::endl;
+#endif
+    //cleanup
     checkCuda(cudaGetLastError());
     checkCuda(cudaDeviceSynchronize());
     checkCuda(cudaFree(centroids));
@@ -438,7 +409,7 @@ int main() {
 
     printf("----CUDA NOT OPTIMAL SOLUTION----\n");
     clock_gettime(CLOCK_MONOTONIC, &start);
-    //   kMeansCUDA(points);
+    kMeansCUDA(points);
     clock_gettime(CLOCK_MONOTONIC, &end);
     print_timediff("CUDA time ", start, end);
 
